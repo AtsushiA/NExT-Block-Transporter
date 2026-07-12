@@ -4,9 +4,17 @@
 
 	<file>.</file>
 
+	<!-- 依存関係・ビルド成果物・CI設定は検査対象外とする。 -->
+	<exclude-pattern>/vendor/*</exclude-pattern>
+	<exclude-pattern>/node_modules/*</exclude-pattern>
+	<exclude-pattern>/.github/*</exclude-pattern>
+
 	<arg name="extensions" value="php"/>
 	<arg name="basepath" value="."/>
 	<arg value="ps"/>
+
+	<!-- 対応する最低WordPressバージョン(非推奨関数チェック等で参照される)。 -->
+	<config name="minimum_wp_version" value="6.4"/>
 
 	<rule ref="WordPress">
 		<!-- コメントは日本語(文末「。」)で記載するため、ASCIIの [.!?] を文末に要求するスニフは除外する。 -->

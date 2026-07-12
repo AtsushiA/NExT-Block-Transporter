@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    name: "PHP Lint (PHP ${{ matrix.php }})"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['7.4', '8.3', '8.4']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          coverage: none
+      # 全PHPファイルを構文チェックし、最低対応バージョン(7.4)での互換性を担保する。
+      - name: Lint all PHP files
+        run: find . -path ./vendor -prune -o -path ./node_modules -prune -o -name '*.php' -print0 | xargs -0 -n1 -P4 php -l
+
+  phpcs:
+    name: phpcs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          tools: composer
+          coverage: none
+      - name: Install Composer dependencies
+        run: composer install --no-interaction --prefer-dist
+      - name: Run phpcs
+        run: composer run phpcs
+
+  plugin-check:
+    name: Plugin Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: wordpress/plugin-check-action@v1
+        with:
+          # vendor / tests / node_modules は本番プラグインに含まれないため除外する。
+          exclude-directories: 'vendor,tests,node_modules'
+          # wp.org 配布前提ではないため plugin_repo は対象外。警告は情報として扱いエラーのみで失敗させる。
+          categories: |
+            general
+            performance
+            accessibility
+            security
+          ignore-warnings: true
+          # フォルダ名(NExT-Block-Transporter)を期待スラッグと見なす TextDomainMismatch を無視する。
+          # コードは正式スラッグ next-block-transporter で統一しており、大文字混在のフォルダ名由来の誤検出のため。
+          ignore-codes: WordPress.WP.I18n.TextDomainMismatch
