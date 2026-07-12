@@ -1,0 +1,71 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - '[0-9]+.[0-9]+.[0-9]+'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get plugin metadata
+        id: meta
+        env:
+          # タグ名は GITHUB_REF から取得する。トリガーで数値のみに制限済みだが env 経由で安全に扱う。
+          GITHUB_REF: ${{ github.ref }}
+        run: |
+          # プラグインヘッダーを持つメインファイルからスラッグを導出する(リポジトリ名とは独立)。
+          MAIN_FILE=$(grep -l "Plugin Name:" *.php | head -1)
+          PLUGIN_SLUG="${MAIN_FILE%.php}"
+          VERSION="${GITHUB_REF#refs/tags/}"
+          echo "main_file=${MAIN_FILE}" >> "$GITHUB_OUTPUT"
+          echo "slug=${PLUGIN_SLUG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify version matches plugin header
+        env:
+          MAIN_FILE: ${{ steps.meta.outputs.main_file }}
+          TAG_VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          # タグのバージョンとプラグインヘッダーの Version が一致しない場合は中断する。
+          HEADER_VERSION=$(grep -oP 'Version:\s*\K[0-9]+\.[0-9]+\.[0-9]+' "$MAIN_FILE")
+          if [ "$HEADER_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::Tag version ($TAG_VERSION) does not match plugin header version ($HEADER_VERSION)"
+            exit 1
+          fi
+
+      - name: Create plugin zip
+        env:
+          SLUG: ${{ steps.meta.outputs.slug }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          # 配布用に開発関連ファイルを除外してスラッグ名のフォルダへ複製し zip 化する。
+          rsync -av \
+            --exclude='.git' \
+            --exclude='.github' \
+            --exclude='node_modules' \
+            --exclude='vendor' \
+            --exclude='tests' \
+            --exclude='composer.json' \
+            --exclude='composer.lock' \
+            --exclude='phpcs.xml.dist' \
+            --exclude='package.json' \
+            --exclude='package-lock.json' \
+            --exclude='.gitignore' \
+            --exclude='.distignore' \
+            --exclude='SPEC.md' \
+            ./ "${SLUG}/"
+          zip -r "${SLUG}-${VERSION}.zip" "${SLUG}/"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.meta.outputs.slug }}-${{ steps.meta.outputs.version }}.zip
+          generate_release_notes: true
