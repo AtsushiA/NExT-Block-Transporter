@@ -63,7 +63,7 @@ package.zip
 {
   "format_version": "1.0",
   "plugin": "next-block-transporter",
-  "plugin_version": "0.1.0",
+  "plugin_version": "0.2.0",
   "created_at": "2026-07-12T12:00:00+00:00",
   "source_site": "https://source-site.example.com",
   "block_markup": "<!-- wp:image {\"id\":123,...} --><figure>...<img src=\"https://source-site.example.com/wp-content/uploads/2026/07/photo.jpg\" class=\"wp-image-123\"/></figure><!-- /wp:image -->",
