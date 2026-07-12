@@ -49,6 +49,19 @@ class NBT_FS {
 			file_put_contents( $index_file, "<?php\n// Silence is golden.\n" ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents, WordPress.WP.AlternativeFunctions.file_put_contents_file_put_contents -- 自プラグイン管理下の一時フォルダ保護ファイルの設置のため。
 		}
 
+		// Apache環境向けに、リスティング無効化とPHP等の実行防止用の .htaccess を設置する。
+		// ZIPの直リンクダウンロードは維持したいので、静的ファイルへのアクセスは許可し、
+		// スクリプト実行ファイル(.php/.phtml/.phar)のみアクセスを拒否する。
+		$htaccess_file = $tmp_dir . '.htaccess';
+		if ( ! file_exists( $htaccess_file ) ) {
+			$htaccess  = "Options -Indexes\n";
+			$htaccess .= "<FilesMatch \"(?i)\\.(php|phtml|phar)$\">\n";
+			$htaccess .= "\t<IfModule mod_authz_core.c>\n\t\tRequire all denied\n\t</IfModule>\n";
+			$htaccess .= "\t<IfModule !mod_authz_core.c>\n\t\tDeny from all\n\t</IfModule>\n";
+			$htaccess .= "</FilesMatch>\n";
+			file_put_contents( $htaccess_file, $htaccess ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents, WordPress.WP.AlternativeFunctions.file_put_contents_file_put_contents -- 自プラグイン管理下の一時フォルダ保護ファイルの設置のため。
+		}
+
 		return $tmp_dir;
 	}
 
