@@ -29,6 +29,7 @@ define( 'NBT_REST_NAMESPACE', 'next-block-transporter/v1' );
 /**
  * Autoload includes
  */
+require_once NBT_PLUGIN_DIR . 'includes/class-nbt-fs.php';
 require_once NBT_PLUGIN_DIR . 'includes/class-nbt-export.php';
 require_once NBT_PLUGIN_DIR . 'includes/class-nbt-import.php';
 require_once NBT_PLUGIN_DIR . 'includes/class-nbt-rest-controller.php';
@@ -100,3 +101,33 @@ add_filter(
 		return $mimes;
 	}
 );
+
+/**
+ * 一時作業フォルダの定期クリーンアップ用cronイベント名
+ */
+define( 'NBT_CLEANUP_HOOK', 'nbt_cleanup_tmp' );
+
+/**
+ * 有効化時に日次クリーンアップイベントをスケジュールする
+ */
+register_activation_hook(
+	__FILE__,
+	function () {
+		if ( ! wp_next_scheduled( NBT_CLEANUP_HOOK ) ) {
+			wp_schedule_event( time(), 'daily', NBT_CLEANUP_HOOK );
+		}
+	}
+);
+
+/**
+ * 無効化時にクリーンアップイベントを解除する
+ */
+register_deactivation_hook(
+	__FILE__,
+	function () {
+		wp_clear_scheduled_hook( NBT_CLEANUP_HOOK );
+	}
+);
+
+// cron発火時に期限切れの一時ファイルを削除する。
+add_action( NBT_CLEANUP_HOOK, array( 'NBT_FS', 'cleanup_expired' ) );

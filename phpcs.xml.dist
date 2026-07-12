@@ -24,4 +24,13 @@
 			</property>
 		</properties>
 	</rule>
+
+	<!-- ZipArchive など PHP 標準クラスのプロパティ(numFiles 等)は snake_case 対象外とする。 -->
+	<rule ref="WordPress.NamingConventions.ValidVariableName">
+		<properties>
+			<property name="allowed_custom_properties" type="array">
+				<element value="numFiles"/>
+			</property>
+		</properties>
+	</rule>
 </ruleset>

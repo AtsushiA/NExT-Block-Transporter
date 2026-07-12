@@ -29,24 +29,36 @@ class NBT_Import {
 	 * @return array{block_markup:string, imported_media:array}|WP_Error
 	 */
 	public function process_package( $zip_file_path ) {
-		$upload_dir = wp_upload_dir();
-		$extract_to = trailingslashit( $upload_dir['basedir'] ) . 'nbt-tmp/extract-' . wp_generate_password( 8, false ) . '/';
+		// 展開先はuploads配下の推測困難なフォルダとし、処理後は必ず削除する。
+		$tmp_dir    = NBT_FS::get_tmp_dir();
+		$extract_to = $tmp_dir . 'extract-' . wp_generate_password( 20, false ) . '/';
 		wp_mkdir_p( $extract_to );
 
 		$zip = new ZipArchive();
 		if ( true !== $zip->open( $zip_file_path ) ) {
+			NBT_FS::delete_dir( $extract_to );
 			return new WP_Error( 'nbt_zip_open_failed', __( 'パッケージファイルを開けませんでした。', 'next-block-transporter' ) );
 		}
-		$zip->extractTo( $extract_to );
+
+		// zip-slip(展開先の外へ書き出すエントリ)やzip爆弾を防ぐため、
+		// 一括展開せず全エントリを事前検査したうえで安全なものだけ展開する。
+		$safe = $this->safe_extract( $zip, $extract_to );
 		$zip->close();
+
+		if ( is_wp_error( $safe ) ) {
+			NBT_FS::delete_dir( $extract_to );
+			return $safe;
+		}
 
 		$manifest_path = $extract_to . 'manifest.json';
 		if ( ! file_exists( $manifest_path ) ) {
+			NBT_FS::delete_dir( $extract_to );
 			return new WP_Error( 'nbt_manifest_missing', __( 'manifest.jsonが見つかりません。パッケージ形式が不正です。', 'next-block-transporter' ) );
 		}
 
 		$manifest = json_decode( file_get_contents( $manifest_path ), true ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- ZIP展開先のローカルファイル読み込みのため。
-		if ( ! is_array( $manifest ) || empty( $manifest['block_markup'] ) ) {
+		if ( ! is_array( $manifest ) || empty( $manifest['block_markup'] ) || ! is_string( $manifest['block_markup'] ) ) {
+			NBT_FS::delete_dir( $extract_to );
 			return new WP_Error( 'nbt_manifest_invalid', __( 'manifest.jsonの内容が不正です。', 'next-block-transporter' ) );
 		}
 
@@ -72,8 +84,13 @@ class NBT_Import {
 				continue;
 			}
 
-			$archive_path = $extract_to . $media_item['archive_path'];
-			if ( ! file_exists( $archive_path ) ) {
+			// archive_path はmanifest(外部入力)由来のため、そのまま結合するとパストラバーサルで
+			// 展開先の外(サーバー上の任意ファイル)を指しうる。実パスが展開先内に収まることを検証する。
+			if ( empty( $media_item['archive_path'] ) || ! is_string( $media_item['archive_path'] ) ) {
+				continue;
+			}
+			$archive_path = NBT_FS::within_dir( $extract_to . $media_item['archive_path'], $extract_to );
+			if ( ! $archive_path || ! is_file( $archive_path ) ) {
 				continue;
 			}
 
@@ -93,7 +110,7 @@ class NBT_Import {
 			if ( isset( $sideloaded[ $media_item['archive_path'] ] ) ) {
 				$new_attachment = $sideloaded[ $media_item['archive_path'] ];
 			} else {
-				$new_attachment = $this->sideload_media( $archive_path, $desired_filename );
+				$new_attachment                            = $this->sideload_media( $archive_path, $desired_filename );
 				$sideloaded[ $media_item['archive_path'] ] = $new_attachment;
 			}
 
@@ -135,12 +152,65 @@ class NBT_Import {
 			$block_markup = serialize_blocks( $blocks );
 		}
 
-		$this->cleanup_dir( $extract_to );
+		NBT_FS::delete_dir( $extract_to );
 
 		return array(
 			'block_markup'   => $block_markup,
 			'imported_media' => $imported_media,
 		);
+	}
+
+	/**
+	 * ZIPを展開先の外へ書き出さないよう検査しながら安全に展開する
+	 *
+	 * Zip-slip(`../` や絶対パスのエントリ名で展開先の外へ書き出す攻撃)と、
+	 * zip爆弾(過大なエントリ数・展開後サイズ)を防ぐ。
+	 *
+	 * @param ZipArchive $zip        オープン済みのZIPアーカイブ。
+	 * @param string     $extract_to 展開先の絶対パス(末尾スラッシュ付き)。
+	 * @return true|WP_Error 成功時true、危険を検知した場合はWP_Error
+	 */
+	private function safe_extract( $zip, $extract_to ) {
+		// 展開エントリ数・展開後合計サイズの上限(zip爆弾対策)。
+		$max_entries    = 2000;
+		$max_total_size = 500 * 1024 * 1024;
+		$num_files      = $zip->numFiles;
+
+		if ( $num_files > $max_entries ) {
+			return new WP_Error( 'nbt_zip_too_many', __( 'パッケージ内のファイル数が多すぎます。', 'next-block-transporter' ) );
+		}
+
+		$total_size = 0;
+		for ( $i = 0; $i < $num_files; $i++ ) {
+			$stat = $zip->statIndex( $i );
+			if ( false === $stat ) {
+				continue;
+			}
+
+			$entry_name = $stat['name'];
+
+			// 絶対パス・ドライブレター・親参照を含むエントリ名は拒否する。
+			if ( '/' === substr( $entry_name, 0, 1 ) || preg_match( '#(^|/)\.\.(/|$)#', $entry_name ) || preg_match( '#^[a-zA-Z]:#', $entry_name ) ) {
+				return new WP_Error( 'nbt_zip_unsafe_path', __( 'パッケージ内に不正なパスが含まれています。', 'next-block-transporter' ) );
+			}
+
+			// 実パスが展開先の外を指す場合も拒否する(二重チェック)。
+			if ( ! NBT_FS::within_dir( $extract_to . $entry_name, $extract_to ) ) {
+				return new WP_Error( 'nbt_zip_unsafe_path', __( 'パッケージ内に不正なパスが含まれています。', 'next-block-transporter' ) );
+			}
+
+			$total_size += isset( $stat['size'] ) ? (int) $stat['size'] : 0;
+			if ( $total_size > $max_total_size ) {
+				return new WP_Error( 'nbt_zip_too_large', __( 'パッケージの展開後サイズが大きすぎます。', 'next-block-transporter' ) );
+			}
+		}
+
+		// 全エントリが安全と確認できたので展開する。
+		if ( ! $zip->extractTo( $extract_to ) ) {
+			return new WP_Error( 'nbt_zip_extract_failed', __( 'パッケージの展開に失敗しました。', 'next-block-transporter' ) );
+		}
+
+		return true;
 	}
 
 	/**
@@ -254,21 +324,35 @@ class NBT_Import {
 	 * @return array{id:int, url:string}|WP_Error
 	 */
 	private function sideload_media( $file_path, $desired_filename ) {
-		$filetype = wp_check_filetype( $desired_filename );
-		if ( empty( $filetype['type'] ) ) {
+		// 拡張子だけでなくファイルの実内容を照合し、拡張子偽装(例: 実体はPHPだが .jpg を名乗る)を防ぐ。
+		$check = wp_check_filetype_and_ext( $file_path, $desired_filename );
+
+		// 実内容から判定した正しいファイル名がある場合はそれを採用する。
+		if ( ! empty( $check['proper_filename'] ) ) {
+			$desired_filename = $check['proper_filename'];
+		}
+
+		// 拡張子と実内容の双方から許可されたMIMEタイプを確定できない場合は拒否する。
+		$mime_type = $check['type'];
+		if ( empty( $mime_type ) || empty( $check['ext'] ) ) {
 			return new WP_Error( 'nbt_invalid_filetype', __( '未対応のファイル形式です。', 'next-block-transporter' ) );
+		}
+
+		// さらにサイト・ユーザーが許可しているMIMEタイプに限定する。
+		if ( ! in_array( $mime_type, array_values( get_allowed_mime_types() ), true ) ) {
+			return new WP_Error( 'nbt_disallowed_filetype', __( 'このファイル形式はアップロードが許可されていません。', 'next-block-transporter' ) );
 		}
 
 		$upload_dir   = wp_upload_dir();
 		$new_filename = wp_unique_filename( $upload_dir['path'], $desired_filename );
 		$new_path     = trailingslashit( $upload_dir['path'] ) . $new_filename;
 
-		if ( ! copy( $file_path, $new_path ) ) {
+		if ( ! copy( $file_path, $new_path ) ) { // phpcs:ignore WordPress.WP.AlternativeFunctions.copy_copy -- 展開済みローカルファイルをuploadsへ複製するため。
 			return new WP_Error( 'nbt_copy_failed', __( 'メディアファイルのコピーに失敗しました。', 'next-block-transporter' ) );
 		}
 
 		$attachment = array(
-			'post_mime_type' => $filetype['type'],
+			'post_mime_type' => $mime_type,
 			'post_title'     => sanitize_file_name( pathinfo( $new_filename, PATHINFO_FILENAME ) ),
 			'post_content'   => '',
 			'post_status'    => 'inherit',
@@ -286,22 +370,5 @@ class NBT_Import {
 			'id'  => $attachment_id,
 			'url' => wp_get_attachment_url( $attachment_id ),
 		);
-	}
-
-	/**
-	 * 展開用一時フォルダを削除する
-	 *
-	 * @param string $dir 削除する一時フォルダの絶対パス。
-	 */
-	private function cleanup_dir( $dir ) {
-		if ( ! is_dir( $dir ) ) {
-			return;
-		}
-		$files = array_diff( scandir( $dir ), array( '.', '..' ) );
-		foreach ( $files as $file ) {
-			$path = $dir . '/' . $file;
-			is_dir( $path ) ? $this->cleanup_dir( $path ) : wp_delete_file( $path );
-		}
-		rmdir( $dir ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_rmdir -- 自プラグイン管理下の一時展開フォルダの削除のため。
 	}
 }

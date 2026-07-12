@@ -28,13 +28,14 @@ class NBT_Export {
 	public function build_package( $block_markup ) {
 		$images = $this->extract_images_from_markup( $block_markup );
 
-		$upload_dir = wp_upload_dir();
-		$tmp_dir    = trailingslashit( $upload_dir['basedir'] ) . 'nbt-tmp/';
-		if ( ! file_exists( $tmp_dir ) ) {
-			wp_mkdir_p( $tmp_dir );
-		}
+		// 生成のたびに期限切れの一時ファイルを掃除しておく(cronが動かない環境の保険)。
+		NBT_FS::cleanup_expired();
 
-		$filename = 'nbt-package-' . gmdate( 'Ymd-His' ) . '-' . wp_generate_password( 6, false ) . '.zip';
+		$upload_dir = wp_upload_dir();
+		$tmp_dir    = NBT_FS::get_tmp_dir();
+
+		// ファイル名は推測困難な長いトークンで生成し、URL列挙による第三者ダウンロードを防ぐ。
+		$filename = 'nbt-package-' . gmdate( 'Ymd-His' ) . '-' . wp_generate_password( 20, false ) . '.zip';
 		$zip_path = $tmp_dir . $filename;
 
 		$zip = new ZipArchive();
@@ -95,7 +96,7 @@ class NBT_Export {
 
 		return array(
 			'zip_path' => $zip_path,
-			'zip_url'  => trailingslashit( $upload_dir['baseurl'] ) . 'nbt-tmp/' . $filename,
+			'zip_url'  => trailingslashit( $upload_dir['baseurl'] ) . NBT_FS::TMP_DIRNAME . '/' . $filename,
 			'filename' => $filename,
 		);
 	}
@@ -215,7 +216,16 @@ class NBT_Export {
 			return false;
 		}
 
-		$relative = str_replace( $upload_dir['baseurl'], '', $url );
-		return $upload_dir['basedir'] . $relative;
+		$relative  = str_replace( $upload_dir['baseurl'], '', $url );
+		$candidate = $upload_dir['basedir'] . $relative;
+
+		// URLに `../` 等が含まれる細工でuploads外(wp-config.php等)を指すのを防ぐため、
+		// 実パスがuploadsディレクトリ内に収まっていることを検証する。
+		$safe_path = NBT_FS::within_dir( $candidate, $upload_dir['basedir'] );
+		if ( ! $safe_path || ! is_file( $safe_path ) ) {
+			return false;
+		}
+
+		return $safe_path;
 	}
 }
