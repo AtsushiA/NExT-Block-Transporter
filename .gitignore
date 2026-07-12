@@ -1,0 +1,34 @@
+# 依存関係
+/vendor/
+/node_modules/
+
+# ビルド成果物
+/build/
+/dist/
+
+# テスト・Lintのキャッシュ
+.phpunit.result.cache
+.phpcs.cache
+
+# ローカル設定の上書きファイル(リポジトリには .dist 版をコミットする)
+/phpcs.xml
+/phpunit.xml
+/.wp-env.override.json
+
+# 環境変数
+.env
+.env.*
+
+# リリース用アーカイブ
+/*.zip
+
+# OS
+.DS_Store
+Thumbs.db
+
+# エディタ・IDE
+/.idea/
+/.vscode/
+
+# Claude Code のローカル設定
+/.claude/settings.local.json

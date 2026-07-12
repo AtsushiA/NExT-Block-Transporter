@@ -1,0 +1,27 @@
+<?xml version="1.0"?>
+<ruleset name="NExT-Block-Transporter">
+	<description>NExT Block Transporter の PHP_CodeSniffer 設定。</description>
+
+	<file>.</file>
+
+	<arg name="extensions" value="php"/>
+	<arg name="basepath" value="."/>
+	<arg value="ps"/>
+
+	<rule ref="WordPress">
+		<!-- コメントは日本語(文末「。」)で記載するため、ASCIIの [.!?] を文末に要求するスニフは除外する。 -->
+		<exclude name="Squiz.Commenting.InlineComment.InvalidEndChar"/>
+		<exclude name="Squiz.Commenting.FunctionComment.ParamCommentFullStop"/>
+		<!-- 括弧を含む日本語コメントがコメントアウトされたコードと誤判定されるため除外する。 -->
+		<exclude name="Squiz.PHP.CommentedOutCode.Found"/>
+	</rule>
+
+	<!-- 翻訳関数のテキストドメインをチェックする。 -->
+	<rule ref="WordPress.WP.I18n">
+		<properties>
+			<property name="text_domain" type="array">
+				<element value="next-block-transporter"/>
+			</property>
+		</properties>
+	</rule>
+</ruleset>
