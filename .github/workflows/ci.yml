@@ -55,3 +55,6 @@ jobs:
             accessibility
             security
           ignore-warnings: true
+          # フォルダ名(NExT-Block-Transporter)を期待スラッグと見なす TextDomainMismatch を無視する。
+          # コードは正式スラッグ next-block-transporter で統一しており、大文字混在のフォルダ名由来の誤検出のため。
+          ignore-codes: WordPress.WP.I18n.TextDomainMismatch
