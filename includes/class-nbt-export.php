@@ -103,42 +103,155 @@ class NBT_Export {
 
 	/**
 	 * ブロックマークアップ内の画像を抽出する
-	 * 対応対象: <img src="...">、および data-id / wp-image-{id} クラス
 	 *
-	 * TODO: gallery / cover / media-text ブロックなど、background-image指定や
-	 *       innerBlocks内の再帰探索が必要なケースを追加で対応すること
+	 * `parse_blocks()` でブロックツリーへ分解し、innerBlocks を再帰的にたどりながら
+	 * 各ブロックの以下の箇所からメディア参照を収集する。
+	 *   - HTML: `<img src="...">`(+ `wp-image-{id}` クラス)と `background-image:url(...)`
+	 *   - ブロック属性(コメントJSON): cover / media-text 等の `url`+`id` / `mediaUrl`+`mediaId`
+	 * これにより gallery(image の innerBlocks)・cover(背景画像)・media-text の
+	 * 入れ子・background-image ケースを検出できる。同一URLは1エントリに重複排除する。
 	 *
 	 * @param string $block_markup 検出対象のシリアライズ済みブロックHTML。
 	 * @return array<int, array{url:string, attachment_id:int|null}>
 	 */
 	private function extract_images_from_markup( $block_markup ) {
 		$images = array();
+		$seen   = array(); // url => $images 内のインデックス。重複排除・attachment_idの後追い補完に使う。
 
-		if ( ! preg_match_all( '/<img[^>]+>/i', $block_markup, $img_tags ) ) {
-			return $images;
-		}
-
-		foreach ( $img_tags[0] as $img_tag ) {
-			if ( ! preg_match( '/src=["\']([^"\']+)["\']/i', $img_tag, $src_match ) ) {
-				continue;
-			}
-			$url = $src_match[1];
-
-			$attachment_id = null;
-			if ( preg_match( '/wp-image-(\d+)/i', $img_tag, $id_match ) ) {
-				$attachment_id = (int) $id_match[1];
-			} else {
-				$attachment_id = attachment_url_to_postid( $url );
-				$attachment_id = $attachment_id ? $attachment_id : null;
-			}
-
-			$images[] = array(
-				'url'           => $url,
-				'attachment_id' => $attachment_id,
-			);
-		}
+		$this->collect_images_from_blocks( parse_blocks( $block_markup ), $images, $seen );
 
 		return $images;
+	}
+
+	/**
+	 * ブロック配列を再帰的にたどってメディア参照を収集する
+	 *
+	 * @param array $blocks parse_blocks() で得たブロック配列。
+	 * @param array $images 収集結果(参照渡しで追記)。
+	 * @param array $seen   url => インデックス の重複排除マップ(参照渡し)。
+	 * @return void
+	 */
+	private function collect_images_from_blocks( $blocks, &$images, &$seen ) {
+		foreach ( $blocks as $block ) {
+			// 1. コメントJSON属性(cover の url / media-text の mediaUrl など)から収集する。
+			if ( ! empty( $block['blockName'] ) && ! empty( $block['attrs'] ) && is_array( $block['attrs'] ) ) {
+				$this->collect_images_from_attrs( $block['blockName'], $block['attrs'], $images, $seen );
+			}
+
+			// 2. このブロック自身のHTML(innerBlocksの中身は含まない)から収集する。
+			if ( ! empty( $block['innerHTML'] ) && is_string( $block['innerHTML'] ) ) {
+				$this->collect_images_from_html( $block['innerHTML'], $images, $seen );
+			}
+
+			// 3. 入れ子ブロック(gallery→image 等)を再帰的にたどる。
+			if ( ! empty( $block['innerBlocks'] ) && is_array( $block['innerBlocks'] ) ) {
+				$this->collect_images_from_blocks( $block['innerBlocks'], $images, $seen );
+			}
+		}
+	}
+
+	/**
+	 * ブロック属性からメディアURLを収集する
+	 *
+	 * `url` 属性はメディア本体を指すブロック(image/cover/video/audio/file)と、
+	 * リンク先を指すブロック(button 等)で意味が異なるため、メディア本体を
+	 * 持つコアブロックに限定して読み取り、誤検出を防ぐ。
+	 *
+	 * @param string $block_name ブロック名(例: core/cover)。
+	 * @param array  $attrs      ブロック属性。
+	 * @param array  $images     収集結果(参照渡し)。
+	 * @param array  $seen       重複排除マップ(参照渡し)。
+	 * @return void
+	 */
+	private function collect_images_from_attrs( $block_name, $attrs, &$images, &$seen ) {
+		// ブロック名 => [URL属性キー => ID属性キー]。
+		$media_attr_map = array(
+			'core/image'      => array( 'url' => 'id' ),
+			'core/cover'      => array( 'url' => 'id' ),
+			'core/media-text' => array( 'mediaUrl' => 'mediaId' ),
+		);
+
+		if ( ! isset( $media_attr_map[ $block_name ] ) ) {
+			return;
+		}
+
+		foreach ( $media_attr_map[ $block_name ] as $url_key => $id_key ) {
+			if ( empty( $attrs[ $url_key ] ) || ! is_string( $attrs[ $url_key ] ) ) {
+				continue;
+			}
+			$attachment_id = ( isset( $attrs[ $id_key ] ) && is_numeric( $attrs[ $id_key ] ) ) ? (int) $attrs[ $id_key ] : null;
+			$this->add_image( $attrs[ $url_key ], $attachment_id, $images, $seen );
+		}
+	}
+
+	/**
+	 * HTML断片から `<img>` と `background-image:url(...)` のメディアURLを収集する
+	 *
+	 * @param string $html   走査対象のHTML。
+	 * @param array  $images 収集結果(参照渡し)。
+	 * @param array  $seen   重複排除マップ(参照渡し)。
+	 * @return void
+	 */
+	private function collect_images_from_html( $html, &$images, &$seen ) {
+		// <img src="..."> — wp-image-{id} クラスがあれば添付IDを優先採用する。
+		if ( preg_match_all( '/<img[^>]+>/i', $html, $img_tags ) ) {
+			foreach ( $img_tags[0] as $img_tag ) {
+				if ( ! preg_match( '/src=["\']([^"\']+)["\']/i', $img_tag, $src_match ) ) {
+					continue;
+				}
+				$attachment_id = null;
+				if ( preg_match( '/wp-image-(\d+)/i', $img_tag, $id_match ) ) {
+					$attachment_id = (int) $id_match[1];
+				}
+				$this->add_image( $src_match[1], $attachment_id, $images, $seen );
+			}
+		}
+
+		// background-image:url(...) / background:...url(...)(cover 等の背景画像)。
+		if ( preg_match_all( '/background(?:-image)?\s*:[^;"\']*url\(\s*["\']?([^"\')]+)["\']?\s*\)/i', $html, $bg_matches ) ) {
+			foreach ( $bg_matches[1] as $bg_url ) {
+				$this->add_image( $bg_url, null, $images, $seen );
+			}
+		}
+	}
+
+	/**
+	 * 収集結果へメディアURLを追加する(URL単位で重複排除)
+	 *
+	 * 添付IDが未指定の場合はURLから解決を試みる。既出URLの場合は追加せず、
+	 * 後から添付IDが判明したときだけ既存エントリを補完する。
+	 *
+	 * @param string   $url           メディアURL。
+	 * @param int|null $attachment_id 判明している添付ファイルID(なければnull)。
+	 * @param array    $images        収集結果(参照渡し)。
+	 * @param array    $seen          url => インデックス の重複排除マップ(参照渡し)。
+	 * @return void
+	 */
+	private function add_image( $url, $attachment_id, &$images, &$seen ) {
+		$url = trim( (string) $url );
+		if ( '' === $url ) {
+			return;
+		}
+
+		if ( ! $attachment_id ) {
+			$resolved      = attachment_url_to_postid( $url );
+			$attachment_id = $resolved ? $resolved : null;
+		}
+
+		if ( isset( $seen[ $url ] ) ) {
+			// 既出URL。背景画像→imgタグ等でIDが後から判明した場合のみ補完する。
+			$index = $seen[ $url ];
+			if ( $attachment_id && empty( $images[ $index ]['attachment_id'] ) ) {
+				$images[ $index ]['attachment_id'] = $attachment_id;
+			}
+			return;
+		}
+
+		$seen[ $url ] = count( $images );
+		$images[]     = array(
+			'url'           => $url,
+			'attachment_id' => $attachment_id,
+		);
 	}
 
 	/**

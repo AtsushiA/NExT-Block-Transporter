@@ -159,8 +159,11 @@ package.zip
 
 ## 5. 未対応・今後の課題(TODO)
 
-- [ ] gallery / cover / media-text ブロックなど、`background-image` やinnerBlocks内に
+- [x] gallery / cover / media-text ブロックなど、`background-image` やinnerBlocks内に
       画像が入れ子になっているケースの再帰的な検出
+      — エクスポート時に `parse_blocks()` でツリー化し、innerBlocks を再帰探索。
+      `<img>` に加え `background-image:url(...)` と cover/media-text 等の
+      `url`/`mediaUrl` 属性(メディア本体を持つコアブロックに限定)からも収集。同一URLは重複排除。
 - [ ] 動画・音声・PDFなど画像以外のメディアタイプの検出・収集への対応拡張
       (パッケージ形式側は `media/` フォルダ・`media` キーで対応済み)
 - [x] 一時ZIP・展開フォルダ(`wp-content/uploads/nbt-tmp/`)の定期クリーンアップ(cron)
