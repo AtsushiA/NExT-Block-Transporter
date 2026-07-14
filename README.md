@@ -1,5 +1,7 @@
 # NExT Block Transporter
 
+[日本語](README.md) | [English](README.en.md)
+
 Gutenbergのブロックを画像込みでパッケージ化し、別サイトへ持ち運べるようにするWordPressプラグイン。
 
 ## 概要
