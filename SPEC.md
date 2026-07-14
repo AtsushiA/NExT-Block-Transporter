@@ -1,5 +1,7 @@
 # NExT Block Transporter 仕様書
 
+[日本語](SPEC.md) | [English](SPEC.en.md)
+
 ## 1. 背景・目的
 
 Gutenberg編集画面でブロックをコピーし、別サイトの編集画面にペーストすると、

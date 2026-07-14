@@ -45,7 +45,7 @@ On the receiving site, simply uploading that package file automatically performs
 
 ## Specification
 
-For details on the package format, REST API, and internal processing, see [SPEC.md](SPEC.md).
+For details on the package format, REST API, and internal processing, see [SPEC.en.md](SPEC.en.md).
 
 ## Development
 
