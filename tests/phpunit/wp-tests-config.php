@@ -33,13 +33,18 @@ define( 'WP_PHP_BINARY', $php_binary );
 
 // wp-content/plugins/NExT-Block-Transporter/tests/phpunit/wp-tests-config.php から
 // 6階層上(tests→phpunit→NExT-Block-Transporter→plugins→wp-content→public)がWordPressのルート(ABSPATH)。
+//
+// getenv()は環境変数が未設定の場合のみfalseを返す(空文字を明示的に設定した場合は''を返す)ため、
+// 真偽値としてではなく `false !== getenv(...)` で判定する。CIのMySQLサービスのように
+// パスワードを意図的に空文字にしている場合、truthyチェックだと空文字が「未設定」と誤判定され
+// デフォルト値にフォールバックしてしまい、実際のDBとパスワードが食い違って接続に失敗するため。
 $abspath = getenv( 'WP_TESTS_ABSPATH' );
-define( 'ABSPATH', ( $abspath ? $abspath : dirname( __DIR__, 5 ) ) . '/' );
+define( 'ABSPATH', ( false !== $abspath ? $abspath : dirname( __DIR__, 5 ) ) . '/' );
 
-define( 'DB_NAME', getenv( 'WP_TESTS_DB_NAME' ) ? getenv( 'WP_TESTS_DB_NAME' ) : 'nbt_phpunit_test' );
-define( 'DB_USER', getenv( 'WP_TESTS_DB_USER' ) ? getenv( 'WP_TESTS_DB_USER' ) : 'root' );
-define( 'DB_PASSWORD', getenv( 'WP_TESTS_DB_PASSWORD' ) ? getenv( 'WP_TESTS_DB_PASSWORD' ) : 'root' );
-define( 'DB_HOST', getenv( 'WP_TESTS_DB_HOST' ) ? getenv( 'WP_TESTS_DB_HOST' ) : '127.0.0.1' );
+define( 'DB_NAME', false !== getenv( 'WP_TESTS_DB_NAME' ) ? getenv( 'WP_TESTS_DB_NAME' ) : 'nbt_phpunit_test' );
+define( 'DB_USER', false !== getenv( 'WP_TESTS_DB_USER' ) ? getenv( 'WP_TESTS_DB_USER' ) : 'root' );
+define( 'DB_PASSWORD', false !== getenv( 'WP_TESTS_DB_PASSWORD' ) ? getenv( 'WP_TESTS_DB_PASSWORD' ) : 'root' );
+define( 'DB_HOST', false !== getenv( 'WP_TESTS_DB_HOST' ) ? getenv( 'WP_TESTS_DB_HOST' ) : '127.0.0.1' );
 define( 'DB_CHARSET', 'utf8' );
 define( 'DB_COLLATE', '' );
 
