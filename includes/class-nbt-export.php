@@ -26,6 +26,10 @@ class NBT_Export {
 	 * @return array{zip_path:string, zip_url:string, filename:string}|WP_Error
 	 */
 	public function build_package( $block_markup ) {
+		// 画像点数・ファイルサイズによってはZIP圧縮(close()時)に時間がかかるため、
+		// 遅い/リソース制限の厳しいサーバーでもタイムアウトしにくいよう緩和しておく。
+		NBT_FS::raise_processing_limits();
+
 		$images = $this->extract_images_from_markup( $block_markup );
 
 		// 生成のたびに期限切れの一時ファイルを掃除しておく(cronが動かない環境の保険)。

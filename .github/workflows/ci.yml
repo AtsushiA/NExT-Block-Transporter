@@ -39,6 +39,53 @@ jobs:
       - name: Run phpcs
         run: composer run phpcs
 
+  phpunit:
+    name: "PHPUnit (PHP ${{ matrix.php }})"
+    runs-on: ubuntu-latest
+    # WordPressコアのテストスイート(wp-phpunit/wp-phpunit、Composer経由)がPHPUnit 10以降の
+    # 削除済みAPIにまだ依存しているため、PHPUnitは9.6系に固定している(composer.jsonのバージョン制約)。
+    # そのため対応PHPバージョンもWP公式サポート範囲の 7.4〜8.3 に合わせる。
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['7.4', '8.2', '8.3']
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ALLOW_EMPTY_PASSWORD: yes
+          MYSQL_DATABASE: wordpress_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          tools: composer
+          extensions: mysqli, zip, gd
+          coverage: none
+      - name: Install Composer dependencies
+        run: composer install --no-interaction --prefer-dist
+      # svn/Docker(wp-env)を使わず、wp-cli経由でABSPATH用のWordPress本体を別ディレクトリへ用意する。
+      - name: Download WordPress core (for ABSPATH)
+        run: |
+          curl -sSL -o /tmp/wp-cli.phar https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
+          php /tmp/wp-cli.phar core download --path=/tmp/wordpress --force
+      - name: Run PHPUnit
+        env:
+          WP_TESTS_ABSPATH: /tmp/wordpress
+          WP_TESTS_DB_NAME: wordpress_test
+          WP_TESTS_DB_USER: root
+          WP_TESTS_DB_PASSWORD: ''
+          WP_TESTS_DB_HOST: 127.0.0.1
+        run: vendor/bin/phpunit
+
   plugin-check:
     name: Plugin Check
     runs-on: ubuntu-latest

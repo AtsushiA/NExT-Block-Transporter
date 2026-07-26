@@ -28,6 +28,24 @@ class NBT_FS {
 	const TMP_TTL = 3600;
 
 	/**
+	 * 重い処理(ZIP展開・画像リサイズ等)の前に実行時間とメモリの上限を緩和する
+	 *
+	 * 遅い/リソース制限の厳しいサーバーでは、既定の max_execution_time や
+	 * memory_limit(REST APIコンテキストは管理画面向けの緩和が効かない)を
+	 * 超えてPHPが強制終了し、インポート・エクスポートが失敗することがある。
+	 * ホスティング側で set_time_limit が禁止されている場合は黙って無視される。
+	 *
+	 * @return void
+	 */
+	public static function raise_processing_limits() {
+		if ( function_exists( 'set_time_limit' ) ) {
+			@set_time_limit( 300 ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.PHP.DiscouragedPHPFunctions.runtime_configuration_set_time_limit -- disable_functionsで禁止されている環境向けに警告を抑制。
+		}
+
+		wp_raise_memory_limit( 'image' );
+	}
+
+	/**
 	 * 一時作業フォルダの絶対パスを返す(無ければ作成する)
 	 *
 	 * 直リスティングやWeb経由の実行を防ぐため、初回作成時に .htaccess と
@@ -95,6 +113,23 @@ class NBT_FS {
 			} else {
 				wp_delete_file( $path );
 			}
+		}
+	}
+
+	/**
+	 * フォルダの更新日時を現在時刻へ更新する
+	 *
+	 * インポートのようにセッションフォルダを複数リクエストにまたがって使い回す処理では、
+	 * フォルダ内のファイルを書き換えるだけではフォルダ自体のmtimeは更新されない
+	 * (cleanup_expiredはフォルダ自身のmtimeで判定するため)。処理が長引いてTTLの間隔が
+	 * 空いても cleanup_expired() に消されないよう、進行中はこれで延命する。
+	 *
+	 * @param string $dir 更新対象のフォルダの絶対パス。
+	 * @return void
+	 */
+	public static function touch_dir( $dir ) {
+		if ( is_dir( $dir ) ) {
+			@touch( $dir ); // phpcs:ignore WordPress.PHP.NoSilencedErrors.Discouraged, WordPress.WP.AlternativeFunctions.file_system_operations_touch -- 自プラグイン管理下の一時フォルダのmtime延命のため。
 		}
 	}
 

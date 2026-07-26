@@ -3,7 +3,7 @@
  * Plugin Name:       NExT Block Transporter
  * Plugin URI:        https://next-season.net/
  * Description:       Gutenbergのブロックを画像込みでパッケージ化してエクスポートし、別サイトへインポート(メディア再アップロード・パス修正・ブロック復元)できるようにするプラグイン。
- * Version:           0.2.0
+ * Version:           0.3.0
  * Requires at least: 6.4
  * Requires PHP:      7.4
  * Author:            NExT-Season
@@ -20,7 +20,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit; // Direct access禁止
 }
 
-define( 'NBT_VERSION', '0.2.0' );
+define( 'NBT_VERSION', '0.3.0' );
 define( 'NBT_PLUGIN_FILE', __FILE__ );
 define( 'NBT_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'NBT_PLUGIN_URL', plugin_dir_url( __FILE__ ) );

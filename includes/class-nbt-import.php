@@ -6,6 +6,13 @@
  * メディアファイルをメディアライブラリへ再アップロード、ブロックマークアップ内の
  * URL / attachment IDを新しいものに置き換えて返す。
  *
+ * 遅い/リソース制限の厳しいサーバーでは、メディア点数が多い・ファイルが大きいパッケージを
+ * 1リクエストで一括処理すると max_execution_time や memory_limit を超えて処理が
+ * 途中終了してしまうことがある。これを避けるため、処理をセッション化し
+ * 「展開(start)」→「メディア1件ずつの登録(process_next)」→「マークアップ確定(finish)」
+ * の複数リクエストに分割して実行できるようにしている。セッション状態は展開先フォルダ内の
+ * 状態ファイル(STATE_FILENAME)へ保存し、リクエストをまたいで引き継ぐ。
+ *
  * @package NExT_Block_Transporter
  */
 
@@ -23,15 +30,31 @@ require_once ABSPATH . 'wp-admin/includes/media.php';
 class NBT_Import {
 
 	/**
-	 * アップロードされたZIPパッケージを処理する
+	 * セッション状態を保存するファイル名(展開先フォルダ直下)
+	 */
+	const STATE_FILENAME = '.nbt-import-state.json';
+
+	/**
+	 * セッションIDとして許容する形式(wp_generate_password(20, false)相当の英数字)
+	 */
+	const SESSION_ID_PATTERN = '/^[A-Za-z0-9]{10,64}$/';
+
+	/**
+	 * アップロードされたZIPパッケージを展開し、インポートセッションを開始する
+	 *
+	 * ZIPの展開とmanifest.jsonの読み込みのみを行い、メディアの登録は行わない
+	 * (メディア登録は1件ずつ process_next() で行う)。
 	 *
 	 * @param string $zip_file_path 一時アップロードされたzipの絶対パス。
-	 * @return array{block_markup:string, imported_media:array}|WP_Error
+	 * @return array{session_id:string, total:int}|WP_Error
 	 */
-	public function process_package( $zip_file_path ) {
-		// 展開先はuploads配下の推測困難なフォルダとし、処理後は必ず削除する。
+	public function start_session( $zip_file_path ) {
+		NBT_FS::raise_processing_limits();
+
+		// 展開先はuploads配下の推測困難なフォルダとし、セッション終了時に必ず削除する。
 		$tmp_dir    = NBT_FS::get_tmp_dir();
-		$extract_to = $tmp_dir . 'extract-' . wp_generate_password( 20, false ) . '/';
+		$session_id = wp_generate_password( 20, false );
+		$extract_to = $tmp_dir . 'extract-' . $session_id . '/';
 		wp_mkdir_p( $extract_to );
 
 		$zip = new ZipArchive();
@@ -62,12 +85,6 @@ class NBT_Import {
 			return new WP_Error( 'nbt_manifest_invalid', __( 'manifest.jsonの内容が不正です。', 'next-block-transporter' ) );
 		}
 
-		$block_markup   = $manifest['block_markup'];
-		$imported_media = array();
-		$url_map        = array();
-		$id_map         = array();
-		$sideloaded     = array();
-
 		// メディア一覧はv1.0の`media`キーから取得する。
 		// フォルダ名変更前の開発中パッケージ用に旧`images`キーもフォールバックで受け付ける。
 		if ( isset( $manifest['media'] ) && is_array( $manifest['media'] ) ) {
@@ -78,77 +95,194 @@ class NBT_Import {
 			$manifest_media = array();
 		}
 
-		foreach ( $manifest_media as $media_item ) {
-			if ( empty( $media_item['resolved'] ) ) {
-				// エクスポート元で解決できなかったメディアはそのまま(URL変更なし)
-				continue;
-			}
+		// エクスポート元で解決できなかったメディア(resolved=false)は登録処理が不要なので、
+		// この時点で処理待ちキューから除外しておく(URLはそのまま・imported_mediaにも計上しない)。
+		$pending = array_values(
+			array_filter(
+				$manifest_media,
+				function ( $media_item ) {
+					return ! empty( $media_item['resolved'] );
+				}
+			)
+		);
 
-			// archive_path はmanifest(外部入力)由来のため、そのまま結合するとパストラバーサルで
-			// 展開先の外(サーバー上の任意ファイル)を指しうる。実パスが展開先内に収まることを検証する。
-			if ( empty( $media_item['archive_path'] ) || ! is_string( $media_item['archive_path'] ) ) {
-				continue;
-			}
-			$archive_path = NBT_FS::within_dir( $extract_to . $media_item['archive_path'], $extract_to );
-			if ( ! $archive_path || ! is_file( $archive_path ) ) {
-				continue;
-			}
+		$state = array(
+			'block_markup'   => $manifest['block_markup'],
+			'pending'        => $pending,
+			'url_map'        => array(),
+			'id_map'         => array(),
+			'imported_media' => array(),
+			'sideloaded'     => array(),
+		);
+		$this->write_state( $extract_to, $state );
 
-			// 登録ファイル名はエクスポート元の元ファイル名を優先する。
-			// manifestは外部入力のため sanitize_file_name を通し、無効・欠落時(旧形式パッケージ)は
-			// ZIP内の連番ファイル名にフォールバックする。
-			$desired_filename = '';
-			if ( ! empty( $media_item['original_filename'] ) && is_string( $media_item['original_filename'] ) ) {
-				$desired_filename = sanitize_file_name( $media_item['original_filename'] );
-			}
-			if ( '' === $desired_filename ) {
-				$desired_filename = basename( $archive_path );
-			}
+		return array(
+			'session_id' => $session_id,
+			'total'      => count( $pending ),
+		);
+	}
 
-			// 同一添付ファイル由来のエントリ(複数サイズ参照)はZIP内実体を共有しているため、
-			// メディアライブラリへの登録は1回だけ行い、結果をキャッシュして使い回す。
-			if ( isset( $sideloaded[ $media_item['archive_path'] ] ) ) {
-				$new_attachment = $sideloaded[ $media_item['archive_path'] ];
-			} else {
-				$new_attachment                            = $this->sideload_media( $archive_path, $desired_filename );
-				$sideloaded[ $media_item['archive_path'] ] = $new_attachment;
-			}
+	/**
+	 * セッション内で未処理のメディアを1件だけ処理する
+	 *
+	 * 1リクエストにつきメディア1件分の登録(ファイルコピー・添付ファイル登録・
+	 * 画像サイズ再生成)のみを行う。呼び出し側は remaining が 0 になるまで繰り返し呼ぶ。
+	 *
+	 * @param string $session_id start_session() が返したセッションID。
+	 * @return array{remaining:int, item:array|null}|WP_Error
+	 */
+	public function process_next( $session_id ) {
+		$extract_to = $this->resolve_session_dir( $session_id );
+		if ( is_wp_error( $extract_to ) ) {
+			return $extract_to;
+		}
 
-			if ( is_wp_error( $new_attachment ) ) {
-				$imported_media[] = array(
-					'original_url' => $media_item['original_url'],
-					'error'        => $new_attachment->get_error_message(),
-				);
-				continue;
-			}
+		// 複数リクエストにまたがる処理中にTTLクリーンアップで消えないよう延命する。
+		NBT_FS::touch_dir( $extract_to );
 
-			// マークアップ中のURLは、参照されていたサイズスラッグに対応する新URLへ差し替える。
-			// (オリジナル画像の登録時に受け入れ側の設定で各サイズが再生成されている)
-			$size_slug = ! empty( $media_item['size_slug'] ) && is_string( $media_item['size_slug'] ) ? $media_item['size_slug'] : 'full';
-			$new_url   = wp_get_attachment_image_url( $new_attachment['id'], $size_slug );
-			if ( ! $new_url ) {
-				// 画像以外のメディアや該当サイズが取得できない場合はフルサイズのURLを使う。
-				$new_url = $new_attachment['url'];
-			}
+		$state = $this->read_state( $extract_to );
+		if ( null === $state ) {
+			return new WP_Error( 'nbt_session_invalid', __( 'インポートセッションが見つかりません。最初からやり直してください。', 'next-block-transporter' ) );
+		}
 
-			// 書き換え用マップに登録する(実際の置換はループ後にブロック単位でまとめて行う)。
-			$url_map[ $media_item['original_url'] ] = $new_url;
-			if ( ! empty( $media_item['attachment_id'] ) ) {
-				$id_map[ (int) $media_item['attachment_id'] ] = (int) $new_attachment['id'];
-			}
-
-			$imported_media[] = array(
-				'original_url'      => $media_item['original_url'],
-				'new_url'           => $new_url,
-				'new_attachment_id' => $new_attachment['id'],
+		if ( empty( $state['pending'] ) ) {
+			// 既に処理済み。呼び出し側の取りこぼしでも安全に完了扱いにする。
+			return array(
+				'remaining' => 0,
+				'item'      => null,
 			);
 		}
 
+		NBT_FS::raise_processing_limits();
+
+		$media_item  = array_shift( $state['pending'] );
+		$item_result = $this->process_media_item( $media_item, $extract_to, $state );
+
+		$this->write_state( $extract_to, $state );
+
+		return array(
+			'remaining' => count( $state['pending'] ),
+			'item'      => $item_result,
+		);
+	}
+
+	/**
+	 * メディア1件をメディアライブラリへ登録し、状態(url_map/id_map/imported_media)を更新する
+	 *
+	 * @param array  $media_item manifest.json の media[] 要素1件分。
+	 * @param string $extract_to ZIP展開先の絶対パス(末尾スラッシュ付き)。
+	 * @param array  $state セッション状態(参照渡しで更新する)。
+	 * @return array|null 処理結果の要約(archive_pathが不正でスキップした場合はnull)
+	 */
+	private function process_media_item( $media_item, $extract_to, &$state ) {
+		// archive_path はmanifest(外部入力)由来のため、そのまま結合するとパストラバーサルで
+		// 展開先の外(サーバー上の任意ファイル)を指しうる。実パスが展開先内に収まることを検証する。
+		if ( empty( $media_item['archive_path'] ) || ! is_string( $media_item['archive_path'] ) ) {
+			return null;
+		}
+		$archive_path = NBT_FS::within_dir( $extract_to . $media_item['archive_path'], $extract_to );
+		if ( ! $archive_path || ! is_file( $archive_path ) ) {
+			return null;
+		}
+
+		// 登録ファイル名はエクスポート元の元ファイル名を優先する。
+		// manifestは外部入力のため sanitize_file_name を通し、無効・欠落時(旧形式パッケージ)は
+		// ZIP内の連番ファイル名にフォールバックする。
+		$desired_filename = '';
+		if ( ! empty( $media_item['original_filename'] ) && is_string( $media_item['original_filename'] ) ) {
+			$desired_filename = sanitize_file_name( $media_item['original_filename'] );
+		}
+		if ( '' === $desired_filename ) {
+			$desired_filename = basename( $archive_path );
+		}
+
+		// 同一添付ファイル由来のエントリ(複数サイズ参照)はZIP内実体を共有しているため、
+		// メディアライブラリへの登録は1回だけ行い、結果をキャッシュして使い回す。
+		// WP_Errorはそのままでは状態ファイル(JSON)に保存できないため、成否をプレーンな配列で保持する。
+		if ( isset( $state['sideloaded'][ $media_item['archive_path'] ] ) ) {
+			$cached = $state['sideloaded'][ $media_item['archive_path'] ];
+		} else {
+			$new_attachment = $this->sideload_media( $archive_path, $desired_filename );
+			if ( is_wp_error( $new_attachment ) ) {
+				$cached = array(
+					'ok'    => false,
+					'error' => $new_attachment->get_error_message(),
+				);
+			} else {
+				$cached = array(
+					'ok'  => true,
+					'id'  => $new_attachment['id'],
+					'url' => $new_attachment['url'],
+				);
+			}
+			$state['sideloaded'][ $media_item['archive_path'] ] = $cached;
+		}
+
+		if ( ! $cached['ok'] ) {
+			$result                    = array(
+				'original_url' => $media_item['original_url'],
+				'error'        => $cached['error'],
+			);
+			$state['imported_media'][] = $result;
+			return $result;
+		}
+
+		// マークアップ中のURLは、参照されていたサイズスラッグに対応する新URLへ差し替える。
+		// (オリジナル画像の登録時に受け入れ側の設定で各サイズが再生成されている)
+		$size_slug = ! empty( $media_item['size_slug'] ) && is_string( $media_item['size_slug'] ) ? $media_item['size_slug'] : 'full';
+		$new_url   = wp_get_attachment_image_url( $cached['id'], $size_slug );
+		if ( ! $new_url ) {
+			// 画像以外のメディアや該当サイズが取得できない場合はフルサイズのURLを使う。
+			$new_url = $cached['url'];
+		}
+
+		// 書き換え用マップに登録する(実際の置換はセッション完了時にブロック単位でまとめて行う)。
+		$state['url_map'][ $media_item['original_url'] ] = $new_url;
+		if ( ! empty( $media_item['attachment_id'] ) ) {
+			$state['id_map'][ (int) $media_item['attachment_id'] ] = (int) $cached['id'];
+		}
+
+		$result                    = array(
+			'original_url'      => $media_item['original_url'],
+			'new_url'           => $new_url,
+			'new_attachment_id' => $cached['id'],
+		);
+		$state['imported_media'][] = $result;
+
+		return $result;
+	}
+
+	/**
+	 * セッションを完了し、ブロックマークアップを確定する
+	 *
+	 * 未処理のメディアが残っている場合はエラーを返す(呼び出し側は process_next() を
+	 * remaining が 0 になるまで呼び切ってから finish_session() を呼ぶこと)。
+	 *
+	 * @param string $session_id start_session() が返したセッションID。
+	 * @return array{block_markup:string, imported_media:array}|WP_Error
+	 */
+	public function finish_session( $session_id ) {
+		$extract_to = $this->resolve_session_dir( $session_id );
+		if ( is_wp_error( $extract_to ) ) {
+			return $extract_to;
+		}
+
+		$state = $this->read_state( $extract_to );
+		if ( null === $state ) {
+			return new WP_Error( 'nbt_session_invalid', __( 'インポートセッションが見つかりません。最初からやり直してください。', 'next-block-transporter' ) );
+		}
+
+		if ( ! empty( $state['pending'] ) ) {
+			return new WP_Error( 'nbt_session_incomplete', __( 'メディアの処理が完了していません。', 'next-block-transporter' ) );
+		}
+
+		$block_markup = $state['block_markup'];
+
 		// ブロックをパースし、属性(コメントJSON)とHTML内のメディア参照を書き換えて再シリアライズする。
 		// 文字列置換では書き換えられないコメントJSON内の id 属性もここで新IDへ更新される。
-		if ( $url_map || $id_map ) {
+		if ( $state['url_map'] || $state['id_map'] ) {
 			$blocks       = parse_blocks( $block_markup );
-			$blocks       = $this->replace_media_references( $blocks, $url_map, $id_map );
+			$blocks       = $this->replace_media_references( $blocks, $state['url_map'], $state['id_map'] );
 			$block_markup = serialize_blocks( $blocks );
 		}
 
@@ -156,8 +290,57 @@ class NBT_Import {
 
 		return array(
 			'block_markup'   => $block_markup,
-			'imported_media' => $imported_media,
+			'imported_media' => $state['imported_media'],
 		);
+	}
+
+	/**
+	 * セッションIDからセッション展開先フォルダの実パスを検証つきで解決する
+	 *
+	 * @param string $session_id 検証対象のセッションID。
+	 * @return string|WP_Error 展開先フォルダの絶対パス(末尾スラッシュ付き)、不正な場合はWP_Error
+	 */
+	private function resolve_session_dir( $session_id ) {
+		if ( ! is_string( $session_id ) || ! preg_match( self::SESSION_ID_PATTERN, $session_id ) ) {
+			return new WP_Error( 'nbt_invalid_session', __( '不正なセッションIDです。', 'next-block-transporter' ) );
+		}
+
+		$tmp_dir   = NBT_FS::get_tmp_dir();
+		$candidate = $tmp_dir . 'extract-' . $session_id;
+		$real_path = NBT_FS::within_dir( $candidate, $tmp_dir );
+
+		if ( ! $real_path || ! is_dir( $real_path ) ) {
+			return new WP_Error( 'nbt_session_not_found', __( 'インポートセッションが見つかりません。最初からやり直してください。', 'next-block-transporter' ) );
+		}
+
+		return trailingslashit( $real_path );
+	}
+
+	/**
+	 * セッション状態を状態ファイルから読み込む
+	 *
+	 * @param string $extract_to セッションの展開先フォルダの絶対パス。
+	 * @return array|null 状態(pending/url_map/id_map/imported_media/sideloaded等を含む連想配列)。読み込めない場合はnull
+	 */
+	private function read_state( $extract_to ) {
+		$path = $extract_to . self::STATE_FILENAME;
+		if ( ! is_file( $path ) ) {
+			return null;
+		}
+
+		$data = json_decode( file_get_contents( $path ), true ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_get_contents_file_get_contents -- 自プラグイン管理下の一時状態ファイル読み込みのため。
+		return is_array( $data ) ? $data : null;
+	}
+
+	/**
+	 * セッション状態を状態ファイルへ保存する
+	 *
+	 * @param string $extract_to セッションの展開先フォルダの絶対パス。
+	 * @param array  $state 保存する状態。
+	 * @return void
+	 */
+	private function write_state( $extract_to, $state ) {
+		file_put_contents( $extract_to . self::STATE_FILENAME, wp_json_encode( $state, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE ) ); // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_file_put_contents, WordPress.WP.AlternativeFunctions.file_put_contents_file_put_contents -- 自プラグイン管理下の一時状態ファイル書き込みのため。
 	}
 
 	/**

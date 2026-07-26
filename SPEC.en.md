@@ -26,18 +26,20 @@ Zip up manifest.json + media/
    ↓
 Download the ZIP -------------------→ Upload the ZIP file
                                           ↓
-                                     POST to REST /import
+                                     POST to REST /import/start (extract ZIP, read manifest)
                                           ↓
-                                     Extract ZIP, read manifest
+                                     POST to REST /import/process-next, repeatedly
+                                     (re-register images to the media library one at a time)
                                           ↓
-                                     Re-register images to the media library
-                                          ↓
-                                     Replace URLs/IDs in the block markup
+                                     POST to REST /import/finish
+                                     (replace URLs/IDs in the block markup and finalize it)
                                           ↓
                                      Turn into blocks with wp.blocks.rawHandler()
                                           ↓
                                      Insert into the post being edited
 ```
+
+Import is split into three requests because processing a package with a large number of media items or large files in a single request can exceed `max_execution_time` or `memory_limit` on a slow or resource-constrained server, causing the request to terminate midway (see chapter 4 for details).
 
 ## 3. Package File Format
 
@@ -102,9 +104,55 @@ Response:
 { "download_url": "https://.../wp-content/uploads/nbt-tmp/xxx.zip", "filename": "xxx.zip" }
 ```
 
-### POST `/wp-json/next-block-transporter/v1/import`
+### Import API (split into three requests)
 
-`multipart/form-data`, field name `package` (the ZIP file).
+Processing a package with a large number of media items or large files in a single request
+(extracting the ZIP + sideloading every media item + regenerating image sizes) can exceed
+`max_execution_time` or `memory_limit` on a slow or resource-constrained server, causing the
+request to terminate midway so the response is never valid JSON and the import fails (this is
+easy to miss in a fast local environment). To avoid this, import is split into three requests:
+"extract", "register media (one at a time)", and "finalize the markup". Each request also
+relaxes the time/memory limits via `NBT_FS::raise_processing_limits()`.
+
+Session state (the extraction path, the queue of pending media, the rewrite maps, etc.) is kept
+server-side in a state file directly under the extraction folder (`.nbt-import-state.json`,
+not publicly listable) and carried across calls via `session_id`. The `session_id` is the
+hard-to-guess token portion of the extraction folder name (validated as alphanumeric-only via
+`NBT_Import::SESSION_ID_PATTERN`).
+
+#### POST `/wp-json/next-block-transporter/v1/import/start`
+
+`multipart/form-data`, field name `package` (the ZIP file). Extracts the ZIP and reads
+manifest.json to start a session. Media is not registered yet.
+
+Response:
+```json
+{ "session_id": "xxxxxxxxxxxxxxxxxxxx", "total": 3 }
+```
+
+#### POST `/wp-json/next-block-transporter/v1/import/process-next`
+
+Registers exactly one unprocessed media item from the session to the media library. The caller
+(`assets/js/editor.js`) calls this repeatedly until `remaining` reaches `0` (if `total` is `0`
+there is no media, so it is never called and the flow proceeds straight to finish).
+
+Parameters: `{ "session_id": "..." }`
+
+Response:
+```json
+{
+  "remaining": 2,
+  "item": { "original_url": "...", "new_url": "...", "new_attachment_id": 456 }
+}
+```
+
+#### POST `/wp-json/next-block-transporter/v1/import/finish`
+
+Call after all media has been registered (once `remaining` reaches `0`) to finalize and return
+the rewritten block markup. The session's temporary folder is deleted here. Calling this while
+media is still pending returns an error (`nbt_session_incomplete`).
+
+Parameters: `{ "session_id": "..." }`
 
 Response:
 ```json
@@ -116,7 +164,7 @@ Response:
 }
 ```
 
-Permissions: Both require the `edit_posts` capability (`current_user_can`).
+Permissions: All of the above require the `edit_posts` capability (`current_user_can`).
 
 ## 4.5 Security Policy
 
@@ -128,6 +176,7 @@ The package (ZIP) and manifest are treated as **untrusted input** brought in fro
 - **Extension-spoofing countermeasure**: On media registration, it checks the consistency between the file's actual content and the extension with `wp_check_filetype_and_ext()`, and accepts only formats allowed by `get_allowed_mime_types()`.
 - **Protection of temporary files**: `uploads/nbt-tmp/` is generated with hard-to-guess file names (20-character token), directory listing is disabled with `index.php`, and files exceeding the TTL (1 hour) are deleted by cron and at generation time.
   * Note: since the download URL is on a public directory, a third party who knows the URL can retrieve it within the TTL. When handling highly confidential packages, consider changing to authenticated streaming delivery (future task).
+- **Validation of the import session ID**: The `session_id` accepted by `/import/process-next` and `/import/finish` is validated as alphanumeric-only (`NBT_Import::SESSION_ID_PATTERN`), and the resulting real path is double-checked with `NBT_FS::within_dir()` to confirm it stays inside the temporary working folder before being treated as the extraction folder (preventing normalization bypasses into someone else's hard-to-guess session).
 
 ## 5. Not Yet Supported / Future Tasks (TODO)
 
@@ -137,7 +186,14 @@ The package (ZIP) and manifest are treated as **untrusted input** brought in fro
       (the package format side already supports it via the `media/` folder and `media` key)
 - [x] Periodic cleanup (cron) of temporary ZIPs and extraction folders (`wp-content/uploads/nbt-tmp/`)
       — Daily cron + cleanup of expired items (TTL 1 hour) at generation time. Listing disabled with `index.php`.
-- [ ] Timeout/memory measures for large numbers of images and large files (streaming ZIP creation)
+- [x] Timeout/memory measures for large numbers of images and large files
+      — Import is now split into per-media-item registration steps (`/import/start` →
+      `/import/process-next` ×N → `/import/finish`), so a single request only ever does the
+      heavy work (sideload + image size regeneration) for one file. Both export and import also
+      relax time/memory limits via `NBT_FS::raise_processing_limits()`.
+      * Note: ZIP compression on the export side (`ZipArchive::close()`) is still a single
+      one-shot operation within one request, so streaming export remains a future task for
+      extremely large/numerous selections.
 - [ ] Preventing duplicate registration with existing media on duplicate import within the same site
       (considering duplicate detection via file hash, etc.)
 - [ ] Reviewing the wording for edge cases in the export UI, such as "selected blocks are empty" and "0 images"

@@ -57,18 +57,46 @@
 
 	/**
 	 * パッケージファイルをインポートし、現在のエディタにブロックを挿入する
+	 *
+	 * メディア点数・ファイルサイズが大きいパッケージを1リクエストで一括処理すると、
+	 * 遅い/リソース制限の厳しいサーバーではサーバー側のタイムアウトで失敗することがある。
+	 * これを避けるため、サーバー側と同様に「展開(start)」→「メディアを1件ずつ登録
+	 * (process-next)」→「マークアップ確定(finish)」の複数リクエストに分割して呼び出す。
 	 */
 	async function importPackage( file, setStatus, insertBlocks ) {
-		setStatus( { type: 'info', message: __( 'インポート中...', 'next-block-transporter' ) } );
+		setStatus( { type: 'info', message: __( 'パッケージを展開中...', 'next-block-transporter' ) } );
 
 		const formData = new FormData();
 		formData.append( 'package', file );
 
 		try {
-			const response = await apiFetch( {
-				path: '/next-block-transporter/v1/import',
+			const { session_id: sessionId, total } = await apiFetch( {
+				path: '/next-block-transporter/v1/import/start',
 				method: 'POST',
 				body: formData,
+			} );
+
+			// メディアが0件でもtotalは0なのでループはスキップされ、そのままfinishへ進む。
+			for ( let done = 0; done < total; done++ ) {
+				setStatus( {
+					type: 'info',
+					message: __( 'メディアを登録中...', 'next-block-transporter' ) + ' (' + ( done + 1 ) + '/' + total + ')',
+				} );
+
+				// 直前の結果が次件の処理に影響しないよう、1件ずつ完了を待ってから次を呼ぶ。
+				await apiFetch( { // eslint-disable-line no-await-in-loop
+					path: '/next-block-transporter/v1/import/process-next',
+					method: 'POST',
+					data: { session_id: sessionId },
+				} );
+			}
+
+			setStatus( { type: 'info', message: __( 'ブロックを復元中...', 'next-block-transporter' ) } );
+
+			const response = await apiFetch( {
+				path: '/next-block-transporter/v1/import/finish',
+				method: 'POST',
+				data: { session_id: sessionId },
 			} );
 
 			const blocks = rawHandler( { HTML: response.block_markup } );

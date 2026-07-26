@@ -57,14 +57,48 @@ Gutenberg編集画面でブロックをコピー&ペーストすると、画像�
 設定は [phpcs.xml.dist](phpcs.xml.dist) を参照してください。
 
 ```sh
-phpcs
+composer install
+composer run phpcs
 ```
+
+### PHPUnitテストの実行
+
+WordPressコアのテストスイート([wp-phpunit/wp-phpunit](https://github.com/wp-phpunit/wp-phpunit))をComposer経由で利用する構成のため、
+別途 wp-env(Docker)や `svn` は不要です。以下だけで動作します。
+
+1. テスト用のMySQLデータベースを用意する(既存のDBとは別の空データベースを1つ作成するだけでよい)。
+2. 以下の環境変数でDB接続情報を指定して `vendor/bin/phpunit`(または `composer run phpunit`)を実行する。
+
+```sh
+composer install
+WP_TESTS_DB_NAME=nbt_phpunit_test \
+WP_TESTS_DB_USER=root \
+WP_TESTS_DB_PASSWORD=root \
+WP_TESTS_DB_HOST=127.0.0.1 \
+composer run phpunit
+```
+
+| 環境変数 | 説明 | 省略時のデフォルト |
+| --- | --- | --- |
+| `WP_TESTS_DB_NAME` | テスト用データベース名 | `nbt_phpunit_test` |
+| `WP_TESTS_DB_USER` | DBユーザー | `root` |
+| `WP_TESTS_DB_PASSWORD` | DBパスワード | `root` |
+| `WP_TESTS_DB_HOST` | DBホスト(`host:port` や `host:/path/to/socket.sock` 形式も可) | `127.0.0.1` |
+| `WP_TESTS_ABSPATH` | テストで読み込むWordPress本体のパス(ABSPATH) | 本プラグイン自身のパスから相対的に自動算出(`wp-content/plugins/`配下で開発している前提) |
+
+Local(Local by Flywheel)等、既に動くWordPress環境の中でこのプラグインを開発している場合は、
+`WP_TESTS_ABSPATH` を指定しなくても自動的にそのWordPress本体を利用します。
+CIでは `WP_TESTS_ABSPATH` で別途ダウンロードしたWordPress本体を指定しています([.github/workflows/ci.yml](.github/workflows/ci.yml) 参照)。
 
 ## ライセンス
 
 [GPLv2 or later](https://www.gnu.org/licenses/gpl-2.0.html)
 
 ## Changelog
+
+### 0.3.0
+
+- [ 不具合修正 ] 遅い/リソース制限の厳しいサーバーで、メディア点数が多い・容量が大きいパッケージのインポートがタイムアウトして失敗する不具合を修正
 
 ### 0.2.0
 

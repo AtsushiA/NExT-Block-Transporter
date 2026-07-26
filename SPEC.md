@@ -30,18 +30,22 @@ manifest.json + media/ をZIP化
    ↓
 ZIPをダウンロード ------------------→ ZIPファイルをアップロード
                                           ↓
-                                     REST /import へPOST
+                                     REST /import/start へPOST(ZIP展開・manifest読込)
                                           ↓
-                                     ZIP展開・manifest読込
+                                     REST /import/process-next へ繰り返しPOST
+                                     (画像を1件ずつメディアライブラリへ再登録)
                                           ↓
-                                     画像をメディアライブラリへ再登録
-                                          ↓
-                                     ブロックマークアップ内のURL/IDを置換
+                                     REST /import/finish へPOST
+                                     (ブロックマークアップ内のURL/IDを置換・確定)
                                           ↓
                                      wp.blocks.rawHandler()でブロック化
                                           ↓
                                      編集中の投稿へ挿入
 ```
+
+インポートを3リクエストに分割しているのは、メディア点数・ファイルサイズが大きいパッケージを
+1リクエストで一括処理すると、遅い/リソース制限の厳しいサーバーで `max_execution_time` や
+`memory_limit` を超えて処理が途中終了してしまうため(詳細は4章)。
 
 ## 3. パッケージファイル形式
 
@@ -124,9 +128,53 @@ package.zip
 { "download_url": "https://.../wp-content/uploads/nbt-tmp/xxx.zip", "filename": "xxx.zip" }
 ```
 
-### POST `/wp-json/next-block-transporter/v1/import`
+### インポートAPI(3リクエストに分割)
 
-`multipart/form-data`、フィールド名 `package`(ZIPファイル)。
+メディア点数・ファイルサイズが大きいパッケージを1リクエストで一括処理(ZIP展開 +
+全メディアのサイドロード + 画像サイズ再生成)すると、遅い/リソース制限の厳しいサーバーでは
+`max_execution_time` や `memory_limit` を超えて処理が途中終了し、レスポンスがJSONにならず
+インポートが失敗することがある(ローカル環境では気づきにくい)。これを避けるため、
+インポートは「展開」「メディア登録(1件ずつ)」「マークアップ確定」の3リクエストに分割する。
+各リクエストは `NBT_FS::raise_processing_limits()` で実行時間・メモリの上限緩和も行う。
+
+セッション状態(展開先パス・処理待ちメディア一覧・書き換えマップ等)は、展開先フォルダ直下の
+状態ファイル(`.nbt-import-state.json`、非公開)にサーバー側で保持し、`session_id` で
+呼び出しをまたいで引き継ぐ。`session_id` は展開先フォルダ名から推測困難なトークン部分を
+抜き出したもの(`NBT_Import::SESSION_ID_PATTERN` で英数字のみを検証)。
+
+#### POST `/wp-json/next-block-transporter/v1/import/start`
+
+`multipart/form-data`、フィールド名 `package`(ZIPファイル)。ZIPを展開しmanifest.jsonを
+読み込んでセッションを開始する。メディアの登録はまだ行わない。
+
+レスポンス:
+```json
+{ "session_id": "xxxxxxxxxxxxxxxxxxxx", "total": 3 }
+```
+
+#### POST `/wp-json/next-block-transporter/v1/import/process-next`
+
+セッション内で未処理のメディアを1件だけメディアライブラリへ登録する。呼び出し側
+(`assets/js/editor.js`)は `remaining` が `0` になるまで繰り返し呼び出す(`total` が `0` の
+場合はメディアが無いので1回も呼ばずfinishへ進む)。
+
+パラメータ: `{ "session_id": "..." }`
+
+レスポンス:
+```json
+{
+  "remaining": 2,
+  "item": { "original_url": "...", "new_url": "...", "new_attachment_id": 456 }
+}
+```
+
+#### POST `/wp-json/next-block-transporter/v1/import/finish`
+
+全メディアの登録完了後(`remaining` が `0` になった後)に呼び出し、書き換え済み
+ブロックマークアップを確定して返す。セッションの一時フォルダはここで削除される。
+未処理のメディアが残っている状態で呼び出した場合はエラー(`nbt_session_incomplete`)。
+
+パラメータ: `{ "session_id": "..." }`
 
 レスポンス:
 ```json
@@ -158,6 +206,10 @@ package.zip
   `index.php` でディレクトリリスティングを無効化、TTL(1時間)超過分をcron・生成時に削除する。
   ※ ダウンロードURLは公開ディレクトリ上のため、URLを知る第三者はTTL内であれば取得可能。
   機密性の高いパッケージを扱う場合は認証付きストリーミング配信への変更を検討する(将来課題)。
+- **インポートセッションIDの検証**: `/import/process-next` `/import/finish` が受け取る
+  `session_id` は英数字のみ(`NBT_Import::SESSION_ID_PATTERN`)であることを検証したうえで、
+  実パスが一時作業フォルダ内に収まることを`NBT_FS::within_dir()`で二重チェックしてから
+  展開先フォルダとして扱う(他人の推測困難なセッションへの正規化バイパスを防ぐ)。
 
 ## 5. 未対応・今後の課題(TODO)
 
@@ -170,7 +222,13 @@ package.zip
       (パッケージ形式側は `media/` フォルダ・`media` キーで対応済み)
 - [x] 一時ZIP・展開フォルダ(`wp-content/uploads/nbt-tmp/`)の定期クリーンアップ(cron)
       — 日次cron + 生成時に期限切れ(TTL 1時間)を掃除。`index.php` でリスティング無効化。
-- [ ] 大量画像・大容量ファイルに対するタイムアウト/メモリ対策(ストリーミングZIP化)
+- [x] 大量画像・大容量ファイルに対するタイムアウト/メモリ対策
+      — インポートはメディア1件ずつの登録に分割(`/import/start` → `/import/process-next` ×N →
+      `/import/finish`)し、1リクエストが処理する重い処理(サイドロード+画像サイズ再生成)を
+      常に1ファイル分に抑えた。エクスポート・インポートとも `NBT_FS::raise_processing_limits()`
+      で実行時間・メモリの上限緩和も併用する。
+      ※ エクスポート側のZIP圧縮(`ZipArchive::close()`)自体は引き続き1リクエスト内の一括処理
+      のため、極端に大量・大容量な画像を選択した場合はエクスポートのストリーミング化が今後の課題として残る。
 - [ ] 同一サイト内での重複インポート時に既存メディアと重複登録されないようにする
       (ファイルハッシュによる重複検出などを検討)
 - [ ] エクスポート時のUIで「選択ブロックが空」「画像0件」などのエッジケース文言を精査
