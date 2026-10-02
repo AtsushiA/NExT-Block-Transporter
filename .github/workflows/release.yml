@@ -13,7 +13,7 @@ jobs:
     name: Create Release
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Get plugin metadata
         id: meta
@@ -68,7 +68,7 @@ jobs:
           zip -r "${SLUG}-${VERSION}.zip" "${SLUG}/"
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: ${{ steps.meta.outputs.slug }}-${{ steps.meta.outputs.version }}.zip
           generate_release_notes: true
