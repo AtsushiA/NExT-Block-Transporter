@@ -89,6 +89,7 @@ package.zip
 - `media[].original_filename`: The actual file name on the export source. Used as the registered file name and media title on import (passed through `sanitize_file_name()` since it is external input). When missing (old-format package), it falls back to the sequential file name of `archive_path`.
 - `media[].size_slug`: The slug of the registered image size that `original_url` pointed to (determined by matching the attachment metadata's `sizes[].file` against the file name in the URL; `full` if there is no match or it is the original size). Because the import side regenerates each size when registering the original image, the URL in the markup is replaced with the result of `wp_get_attachment_image_url( new_id, size_slug )`. If the corresponding size does not exist, or for non-images, it falls back to the full-size URL. The `sizeSlug` block attribute is kept as-is, so it stays consistent with the editor's "Resolution" setting.
 - `media[].resolved`: `false` when the file itself could not be resolved on the export source. In that case the import side keeps the original URL as-is (i.e., the media is missing but the block structure is not broken).
+- `media[].attachment_id`: The attachment ID (the media's post ID) on the export source. If the import destination has **an attachment with the same ID whose original image file name matches `original_filename`**, that existing attachment is reused instead of registering a new one (preventing duplicate media when migrating between sites of the same lineage, such as staging → production). The ID alone is not trusted because the ID of media added later on the source may be used by an unrelated post or a different image on the destination. The file name is compared using the basename of `wp_get_original_image_path()` (`get_attached_file()` for non-images), the same as on export. If there is no ID or it does not match, the media is registered as new as before.
 - Compatibility: Packages from development before the folder rename (`images` key) are accepted as a fallback on import.
 
 ## 4. REST API
@@ -142,9 +143,11 @@ Response:
 ```json
 {
   "remaining": 2,
-  "item": { "original_url": "...", "new_url": "...", "new_attachment_id": 456 }
+  "item": { "original_url": "...", "new_url": "...", "new_attachment_id": 456, "reused": false }
 }
 ```
+
+`reused` is `true` when existing media on the import destination was reused instead of registering new media.
 
 #### POST `/wp-json/next-block-transporter/v1/import/finish`
 
@@ -159,7 +162,7 @@ Response:
 {
   "block_markup": "the rewritten block markup",
   "imported_media": [
-    { "original_url": "...", "new_url": "...", "new_attachment_id": 456 }
+    { "original_url": "...", "new_url": "...", "new_attachment_id": 456, "reused": false }
   ]
 }
 ```
@@ -194,8 +197,9 @@ The package (ZIP) and manifest are treated as **untrusted input** brought in fro
       * Note: ZIP compression on the export side (`ZipArchive::close()`) is still a single
       one-shot operation within one request, so streaming export remains a future task for
       extremely large/numerous selections.
-- [ ] Preventing duplicate registration with existing media on duplicate import within the same site
-      (considering duplicate detection via file hash, etc.)
+- [x] Preventing duplicate registration with existing media on duplicate import within the same site
+      — Existing media whose attachment ID (post ID) and original image file name both match is reused.
+      Note: an image whose content was replaced without changing its file name will resolve to the existing one (hash comparison remains a future consideration).
 - [ ] Reviewing the wording for edge cases in the export UI, such as "selected blocks are empty" and "0 images"
 - [ ] Final decision on whether to brand with the custom `.nxbt` extension
 

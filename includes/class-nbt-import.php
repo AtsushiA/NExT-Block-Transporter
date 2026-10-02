@@ -202,18 +202,30 @@ class NBT_Import {
 		if ( isset( $state['sideloaded'][ $media_item['archive_path'] ] ) ) {
 			$cached = $state['sideloaded'][ $media_item['archive_path'] ];
 		} else {
-			$new_attachment = $this->sideload_media( $archive_path, $desired_filename );
-			if ( is_wp_error( $new_attachment ) ) {
+			$existing_id = $this->find_reusable_attachment( $media_item );
+			if ( $existing_id ) {
+				// 同一サイト間(ステージング→本番等)の移行で、インポート先に同じメディアが既にある場合は
+				// 再登録せず既存の添付ファイルを採用し、メディアライブラリへの重複登録を防ぐ。
 				$cached = array(
-					'ok'    => false,
-					'error' => $new_attachment->get_error_message(),
+					'ok'     => true,
+					'id'     => $existing_id,
+					'url'    => wp_get_attachment_url( $existing_id ),
+					'reused' => true,
 				);
 			} else {
-				$cached = array(
-					'ok'  => true,
-					'id'  => $new_attachment['id'],
-					'url' => $new_attachment['url'],
-				);
+				$new_attachment = $this->sideload_media( $archive_path, $desired_filename );
+				if ( is_wp_error( $new_attachment ) ) {
+					$cached = array(
+						'ok'    => false,
+						'error' => $new_attachment->get_error_message(),
+					);
+				} else {
+					$cached = array(
+						'ok'  => true,
+						'id'  => $new_attachment['id'],
+						'url' => $new_attachment['url'],
+					);
+				}
 			}
 			$state['sideloaded'][ $media_item['archive_path'] ] = $cached;
 		}
@@ -246,6 +258,7 @@ class NBT_Import {
 			'original_url'      => $media_item['original_url'],
 			'new_url'           => $new_url,
 			'new_attachment_id' => $cached['id'],
+			'reused'            => ! empty( $cached['reused'] ),
 		);
 		$state['imported_media'][] = $result;
 
@@ -496,6 +509,48 @@ class NBT_Import {
 		);
 
 		return $html;
+	}
+
+	/**
+	 * インポート先に既に存在する同一メディア(添付ファイル)を探す
+	 *
+	 * ステージング→本番のように同一サイト系統間で移行する場合、元サイトの添付ファイルID
+	 * (メディアのポストID)がインポート先にもそのまま存在することが多い。ただし元サイトで
+	 * 後から追加したメディアのIDは、インポート先では無関係な投稿・別の画像に使われている
+	 * 可能性があるため、IDに加えてファイル名も一致した場合に限り同一メディアとみなす。
+	 * ファイル名はエクスポート側と同じく、-scaled 等の縮小前のオリジナル画像
+	 * (`wp_get_original_image_path()`、画像以外は `get_attached_file()`)で比較する。
+	 *
+	 * @param array $media_item manifest.json の media[] 要素1件分。
+	 * @return int 採用できる既存の添付ファイルID。該当なしの場合は0
+	 */
+	private function find_reusable_attachment( $media_item ) {
+		if ( empty( $media_item['attachment_id'] ) || ! is_numeric( $media_item['attachment_id'] ) ) {
+			return 0;
+		}
+		if ( empty( $media_item['original_filename'] ) || ! is_string( $media_item['original_filename'] ) ) {
+			return 0;
+		}
+
+		$attachment_id = (int) $media_item['attachment_id'];
+		$post          = get_post( $attachment_id );
+		if ( ! $post || 'attachment' !== $post->post_type ) {
+			return 0;
+		}
+
+		$existing_path = wp_get_original_image_path( $attachment_id );
+		if ( ! $existing_path ) {
+			$existing_path = get_attached_file( $attachment_id );
+		}
+		if ( ! $existing_path || ! file_exists( $existing_path ) ) {
+			return 0;
+		}
+
+		if ( wp_basename( $existing_path ) !== $media_item['original_filename'] ) {
+			return 0;
+		}
+
+		return $attachment_id;
 	}
 
 	/**

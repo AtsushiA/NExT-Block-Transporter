@@ -48,10 +48,16 @@ class NBT_Import_Test extends WP_UnitTestCase {
 	/**
 	 * 指定件数の画像添付ファイルとそれらを参照するブロックマークアップからエクスポートZIPを作る
 	 *
-	 * @param int $count 含める画像の件数。
+	 * テストは同一サイト内でエクスポート→インポートを行うため、そのままでは「インポート先に
+	 * 同じメディアが既にある」状態になり、既存メディアの採用(重複登録の回避)が働く。
+	 * 別サイトへの移行(新規登録)を検証する場合は、エクスポート後に元の添付ファイルを削除して
+	 * インポート先に存在しない状態を再現する。
+	 *
+	 * @param int  $count            含める画像の件数。
+	 * @param bool $delete_originals エクスポート後に元の添付ファイルを削除するか(別サイトへの移行を再現)。
 	 * @return array{zip_path:string, attachment_ids:int[]} エクスポートしたZIPのパスと元添付ファイルID一覧
 	 */
-	private function build_test_package( $count ) {
+	private function build_test_package( $count, $delete_originals = true ) {
 		$fixtures = array( 'canola.jpg', 'test-image-3.jpg', 'test-image-4.png', 'codeispoetry.png' );
 
 		$attachment_ids = array();
@@ -71,6 +77,12 @@ class NBT_Import_Test extends WP_UnitTestCase {
 
 		$package = ( new NBT_Export() )->build_package( $markup );
 		$this->assertIsArray( $package, '前提: テスト用パッケージ(ZIP)の生成に成功すること' );
+
+		if ( $delete_originals ) {
+			foreach ( $attachment_ids as $id ) {
+				wp_delete_attachment( $id, true );
+			}
+		}
 
 		return array(
 			'zip_path'       => $package['zip_path'],
@@ -341,5 +353,162 @@ class NBT_Import_Test extends WP_UnitTestCase {
 
 		$finish = $importer->finish_session( $start['session_id'] );
 		$this->assertStringContainsString( 'https://example.com/remote-image.jpg', $finish['block_markup'], '解決できなかったメディアのURLは書き換えられずそのまま残ること' );
+	}
+
+	/**
+	 * パッケージ内メディアのファイル実体と、指定したmanifest.media[]でテスト用ZIPを作る
+	 *
+	 * @param string $markup      ブロックマークアップ。
+	 * @param array  $media_items manifest.media[] の要素一覧(archive_path は media/media-{index}.{ext})。
+	 * @param array  $files       archive_path => 格納するローカルファイルの絶対パス。
+	 * @return string 作成したZIPの絶対パス
+	 */
+	private function build_custom_package( $markup, $media_items, $files ) {
+		$manifest = array(
+			'format_version' => '1.0',
+			'plugin'         => 'next-block-transporter',
+			'plugin_version' => NBT_VERSION,
+			'created_at'     => gmdate( 'c' ),
+			'source_site'    => site_url(),
+			'block_markup'   => $markup,
+			'media'          => $media_items,
+		);
+
+		$zip_path = trailingslashit( NBT_FS::get_tmp_dir() ) . 'nbt-test-custom-' . wp_generate_password( 8, false ) . '.zip';
+		$zip      = new ZipArchive();
+		$this->assertTrue( $zip->open( $zip_path, ZipArchive::CREATE | ZipArchive::OVERWRITE ) === true );
+		$zip->addFromString( 'manifest.json', wp_json_encode( $manifest ) );
+		foreach ( $files as $archive_path => $local_path ) {
+			$zip->addFile( $local_path, $archive_path );
+		}
+		$zip->close();
+
+		return $zip_path;
+	}
+
+	/**
+	 * セッションの全メディアを処理してfinishし、finishの結果とprocess_nextの処理結果一覧を返す
+	 *
+	 * @param string $zip_path インポートするZIPの絶対パス。
+	 * @return array{finish:array, items:array} finish_session() の結果と process_next() の item 一覧
+	 */
+	private function run_import( $zip_path ) {
+		$importer = new NBT_Import();
+		$start    = $importer->start_session( $zip_path );
+		$this->assertIsArray( $start, '前提: インポートセッションを開始できること' );
+
+		$items = array();
+		for ( $i = 0; $i < $start['total']; $i++ ) {
+			$result  = $importer->process_next( $start['session_id'] );
+			$items[] = $result['item'];
+			if ( ! empty( $result['item']['new_attachment_id'] ) ) {
+				$this->created_attachment_ids[] = $result['item']['new_attachment_id'];
+			}
+		}
+
+		return array(
+			'finish' => $importer->finish_session( $start['session_id'] ),
+			'items'  => $items,
+		);
+	}
+
+	/**
+	 * 現在の添付ファイル件数を返す
+	 *
+	 * @return int
+	 */
+	private function count_attachments() {
+		// wp_count_posts() はオブジェクトキャッシュされ添付ファイル登録直後の件数を反映しないため、都度問い合わせる。
+		$ids = get_posts(
+			array(
+				'post_type'   => 'attachment',
+				'post_status' => 'any',
+				'numberposts' => -1,
+				'fields'      => 'ids',
+			)
+		);
+		return count( $ids );
+	}
+
+	/**
+	 * インポート先にポストIDとファイル名が同一のメディアがある場合、再登録せず既存の添付ファイルを採用することを確認する
+	 *
+	 * (ステージング→本番のような同一サイト系統間の移行で、メディアが重複登録されないこと)
+	 *
+	 * @return void
+	 */
+	public function test_import_reuses_existing_attachment_when_id_and_filename_match() {
+		$package      = $this->build_test_package( 2, false );
+		$original_ids = $package['attachment_ids'];
+
+		$count_before = $this->count_attachments();
+		$import       = $this->run_import( $package['zip_path'] );
+
+		$this->assertSame( $count_before, $this->count_attachments(), 'ポストIDとファイル名が一致する場合 => 新しい添付ファイルが登録されないこと' );
+
+		foreach ( $import['items'] as $index => $item ) {
+			$this->assertSame( $original_ids[ $index ], $item['new_attachment_id'], 'ポストIDとファイル名が一致する場合 => 既存の添付ファイルIDが採用されること' );
+			$this->assertTrue( $item['reused'], 'ポストIDとファイル名が一致する場合 => reusedがtrueになること' );
+			$this->assertSame( wp_get_attachment_url( $original_ids[ $index ] ), $item['new_url'], '既存の添付ファイルのURLが使われること' );
+		}
+
+		foreach ( $original_ids as $original_id ) {
+			$this->assertStringContainsString( 'wp-image-' . $original_id, $import['finish']['block_markup'], '書き換え後のマークアップは既存の添付ファイルIDを参照すること' );
+		}
+	}
+
+	/**
+	 * ポストIDが同じでもファイル名が異なる場合・添付ファイル以外の投稿の場合・IDが無い場合は、
+	 * 既存メディアを採用せず新規登録することを確認する
+	 *
+	 * @return void
+	 */
+	public function test_import_registers_new_attachment_when_existing_media_does_not_match() {
+		$existing_id                    = self::factory()->attachment->create_upload_object( DIR_TESTDATA . '/images/canola.jpg' );
+		$this->created_attachment_ids[] = $existing_id;
+		$non_attachment_id              = self::factory()->post->create();
+		$fixture                        = DIR_TESTDATA . '/images/test-image-3.jpg';
+
+		$test_cases = array(
+			array(
+				'test_condition_name' => 'ポストIDは既存メディアと同じだがファイル名が異なる場合 => 新規登録',
+				'attachment_id'       => $existing_id,
+				'original_filename'   => 'test-image-3.jpg',
+			),
+			array(
+				'test_condition_name' => 'ポストIDが添付ファイル以外の投稿を指す場合 => 新規登録',
+				'attachment_id'       => $non_attachment_id,
+				'original_filename'   => 'test-image-3.jpg',
+			),
+			array(
+				'test_condition_name' => 'ポストIDが無い場合 => 新規登録',
+				'attachment_id'       => null,
+				'original_filename'   => 'canola.jpg',
+			),
+		);
+
+		foreach ( $test_cases as $case ) {
+			$url    = 'https://staging.example.com/wp-content/uploads/' . $case['original_filename'];
+			$markup = '<!-- wp:image {"sizeSlug":"full"} --><figure class="wp-block-image size-full"><img src="' . esc_url( $url ) . '"/></figure><!-- /wp:image -->';
+			$media  = array(
+				array(
+					'index'             => 0,
+					'original_url'      => $url,
+					'original_filename' => $case['original_filename'],
+					'archive_path'      => 'media/media-0.jpg',
+					'attachment_id'     => $case['attachment_id'],
+					'size_slug'         => 'full',
+					'resolved'          => true,
+				),
+			);
+
+			$count_before = $this->count_attachments();
+			$import       = $this->run_import( $this->build_custom_package( $markup, $media, array( 'media/media-0.jpg' => $fixture ) ) );
+			$item         = $import['items'][0];
+
+			$this->assertSame( $count_before + 1, $this->count_attachments(), $case['test_condition_name'] . '(添付ファイルが1件増えること)' );
+			$this->assertNotSame( $existing_id, $item['new_attachment_id'], $case['test_condition_name'] . '(既存IDが採用されないこと)' );
+			$this->assertFalse( $item['reused'], $case['test_condition_name'] . '(reusedがfalseになること)' );
+		}
 	}
 }

@@ -102,10 +102,15 @@
 			const blocks = rawHandler( { HTML: response.block_markup } );
 			insertBlocks( blocks );
 
-			setStatus( {
-				type: 'success',
-				message: __( 'ブロックを復元しました。(メディア: ', 'next-block-transporter' ) + response.imported_media.length + '件)',
-			} );
+			// 既存メディアを採用した件数(同一サイト間の移行で重複登録を避けたもの)を内訳として表示する。
+			const reusedCount = response.imported_media.filter( ( item ) => item.reused ).length;
+			let message = __( 'ブロックを復元しました。(メディア: ', 'next-block-transporter' ) + response.imported_media.length + '件';
+			if ( reusedCount > 0 ) {
+				message += __( '、うち既存メディアを利用: ', 'next-block-transporter' ) + reusedCount + '件';
+			}
+			message += ')';
+
+			setStatus( { type: 'success', message } );
 		} catch ( error ) {
 			setStatus( { type: 'error', message: error.message || __( 'インポートに失敗しました。', 'next-block-transporter' ) } );
 		}
