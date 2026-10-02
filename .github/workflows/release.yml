@@ -47,6 +47,8 @@ jobs:
           VERSION: ${{ steps.meta.outputs.version }}
         run: |
           # 配布用に開発関連ファイルを除外してスラッグ名のフォルダへ複製し zip 化する。
+          # SPEC は翻訳版(SPEC.en.md 等)も開発者向けドキュメントなのでワイルドカードで一括除外する。
+          # README は利用者向けなので翻訳版も含めて同梱する。
           rsync -av \
             --exclude='.git' \
             --exclude='.github' \
@@ -56,11 +58,12 @@ jobs:
             --exclude='composer.json' \
             --exclude='composer.lock' \
             --exclude='phpcs.xml.dist' \
+            --exclude='phpunit.xml.dist' \
             --exclude='package.json' \
             --exclude='package-lock.json' \
             --exclude='.gitignore' \
             --exclude='.distignore' \
-            --exclude='SPEC.md' \
+            --exclude='SPEC*.md' \
             ./ "${SLUG}/"
           zip -r "${SLUG}-${VERSION}.zip" "${SLUG}/"
 
