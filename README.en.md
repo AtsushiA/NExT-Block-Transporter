@@ -92,6 +92,11 @@ CI instead points `WP_TESTS_ABSPATH` at a separately downloaded WordPress core (
 
 ## Changelog
 
+### 0.4.0
+
+- [ Feature ] When importing between sites of the same lineage (e.g. staging to production), reuse an existing media item whose attachment ID and original image file name both match, preventing duplicate entries in the media library
+- [ Feature ] Show how many media items were reused in the import completion message
+
 ### 0.3.0
 
 - [ Bug Fix ] Fixed an issue where importing a package with many media items or large files would time out and fail on slow or resource-constrained servers
