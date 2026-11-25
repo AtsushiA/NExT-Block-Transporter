@@ -2,6 +2,8 @@
 
 **English** | [日本語](README.md)
 
+[![Try in WordPress Playground](https://img.shields.io/badge/Try%20in-WordPress%20Playground-3858e9?logo=wordpress)](https://playground.wordpress.net/?blueprint-url=https://raw.githubusercontent.com/AtsushiA/NExT-Block-Transporter/main/blueprint.json)
+
 A WordPress plugin that packages Gutenberg blocks together with their images so they can be carried over to another site.
 
 ## Overview
